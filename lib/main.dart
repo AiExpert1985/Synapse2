@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -30,6 +31,8 @@ class ImportScreen extends StatefulWidget {
 }
 
 class _ImportScreenState extends State<ImportScreen> {
+  static final _channel = const MethodChannel('media_utils');
+
   String? _sourcePath;
   String? _destPath;
   final List<String> _errors = [];
@@ -50,12 +53,14 @@ class _ImportScreenState extends State<ImportScreen> {
         return;
       }
 
-      final sourcePath = result.files.single.path!;
-      final fileName = result.files.single.name;
+      final file = result.files.single;
+      final cachePath = file.path!;
+      final identifier = file.identifier; // content URI on Android
+      final fileName = file.name;
       final appDir = await getApplicationDocumentsDirectory();
       final destPath = p.join(appDir.path, fileName);
 
-      await _moveFile(sourcePath, destPath);
+      await _moveFile(cachePath: cachePath, identifier: identifier, destPath: destPath);
     } catch (e) {
       _logError('Unexpected error: $e');
     } finally {
@@ -63,24 +68,35 @@ class _ImportScreenState extends State<ImportScreen> {
     }
   }
 
-  Future<void> _moveFile(String sourcePath, String destPath) async {
+  Future<void> _moveFile({
+    required String cachePath,
+    required String? identifier,
+    required String destPath,
+  }) async {
     File? copiedFile;
     try {
-      copiedFile = await File(sourcePath).copy(destPath);
+      copiedFile = await File(cachePath).copy(destPath);
     } catch (e) {
       _logError('Move failed (copy step): $e');
       return;
     }
 
-    try {
-      await File(sourcePath).delete();
-    } catch (e) {
-      _logError('Delete original failed: $e');
-      // Copy succeeded but delete failed — still show destination.
+    // Delete the original via content URI (the only way on Android 10+).
+    if (identifier != null) {
+      try {
+        final deleted = await _channel.invokeMethod<bool>('deleteByUri', identifier);
+        if (deleted != true) {
+          _logError('Delete original: user denied the system delete prompt.');
+        }
+      } on PlatformException catch (e) {
+        _logError('Delete original failed: ${e.message}');
+      }
+    } else {
+      _logError('Delete original skipped: no content URI available for this file.');
     }
 
     setState(() {
-      _sourcePath = sourcePath;
+      _sourcePath = identifier ?? cachePath;
       _destPath = copiedFile!.path;
     });
   }
